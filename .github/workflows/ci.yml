@@ -1,0 +1,70 @@
+name: CI
+
+# 1) Déclencheur : à chaque push sur la branche main
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-run-test:
+    runs-on: ubuntu-latest   # Docker est déjà installé sur cette machine GitHub
+
+    env:                     # variables réutilisées partout, pour éviter les répétitions
+      IMAGE_NAME: doordash-copycat
+      CONTAINER_NAME: doordash-copycat-ci
+      PORT: 8090
+
+    steps:
+      # Récupère le code du repo dans la machine
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) Build de l'image Docker à partir du Dockerfile à la racine
+      - name: Build Docker image
+        run: docker build -t "$IMAGE_NAME" .
+
+      # 3) Lance le conteneur en arrière-plan (-d) et mappe le port
+      - name: Run container
+        run: docker run -d --name "$CONTAINER_NAME" -p "$PORT:$PORT" "$IMAGE_NAME"
+
+      # Attend que l'API réponde avant de tester (le serveur met qq secondes à démarrer)
+      - name: Wait for the API to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf "http://localhost:$PORT/status/" > /dev/null; then
+              echo "API prête après ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "L'API n'a pas démarré à temps"
+          docker logs "$CONTAINER_NAME"   # affiche les logs pour debug
+          exit 1
+
+      # 4) Teste tous les endpoints ; curl --fail (-f) échoue si le code HTTP >= 400
+      - name: Test endpoints
+        run: |
+          set -e   # stoppe le step au premier échec
+
+          echo "GET /"
+          curl -sf "http://localhost:$PORT/"
+
+          echo "GET /status/"
+          curl -sf "http://localhost:$PORT/status/"
+
+          echo "GET /estimate-time/12"
+          curl -sf "http://localhost:$PORT/estimate-time/12"
+
+          echo "POST /calculate-fee/"
+          curl -sf -X POST "http://localhost:$PORT/calculate-fee/" \
+            -H "Content-Type: application/json" \
+            -d '{"distance_km": 10, "weight_kg": 2.5}'
+
+          echo -e "\nTous les endpoints ont répondu"
+
+      # 5) Stoppe et supprime le conteneur — TOUJOURS, même si un test a échoué
+      - name: Stop and clean up container
+        if: always()
+        run: |
+          docker stop "$CONTAINER_NAME" || true
+          docker rm "$CONTAINER_NAME" || true
